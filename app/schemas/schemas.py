@@ -353,6 +353,7 @@ class SparePartStockResponse(BaseModel):
     quantity: int
     safety_stock: int
     reserved_quantity: int
+    available_quantity: int = 0
     status: StockStatus
 
     class Config:
@@ -382,6 +383,7 @@ class ReplenishmentResponse(BaseModel):
     part_stock_id: int
     requested_quantity: int
     status: ReplenishmentStatus
+    source: Optional[str] = None
     reason: Optional[str] = None
     created_by: Optional[int] = None
     created_at: datetime
@@ -392,6 +394,20 @@ class ReplenishmentResponse(BaseModel):
     estimated_delivery: Optional[datetime] = None
     actual_delivery: Optional[datetime] = None
     locked_for_outbound: bool
+    logs: Optional[List["ReplenishmentLogResponse"]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ReplenishmentLogResponse(BaseModel):
+    id: int
+    request_id: int
+    action: str
+    operator_id: Optional[int] = None
+    operator_name: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: datetime
 
     class Config:
         from_attributes = True

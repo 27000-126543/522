@@ -329,6 +329,7 @@ class ReplenishmentRequest(Base):
     requested_quantity = Column(Integer, nullable=False)
     status = Column(Enum(ReplenishmentStatus), default=ReplenishmentStatus.PENDING, index=True)
     reason = Column(Text)
+    source = Column(String(20), default="manual")
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.now, index=True)
     approved_by = Column(Integer, ForeignKey("users.id"))
@@ -341,6 +342,21 @@ class ReplenishmentRequest(Base):
     pushed = Column(Boolean, default=False)
 
     part_stock = relationship("SparePartStock")
+    logs = relationship("ReplenishmentLog", back_populates="request", order_by="ReplenishmentLog.created_at")
+
+
+class ReplenishmentLog(Base):
+    __tablename__ = "replenishment_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(Integer, ForeignKey("replenishment_requests.id"), nullable=False, index=True)
+    action = Column(String(50), nullable=False)
+    operator_id = Column(Integer, ForeignKey("users.id"))
+    operator_name = Column(String(100))
+    notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+    request = relationship("ReplenishmentRequest", back_populates="logs")
 
 
 class MaintenancePlan(Base):
