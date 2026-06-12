@@ -318,6 +318,28 @@ class SparePartStock(Base):
 
     part = relationship("SparePart", back_populates="stocks")
     wind_farm = relationship("WindFarm", back_populates="spare_parts")
+    transactions = relationship("StockTransaction", back_populates="stock", order_by="StockTransaction.created_at.desc()")
+
+
+class StockTransaction(Base):
+    __tablename__ = "stock_transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    stock_id = Column(Integer, ForeignKey("spare_part_stocks.id"), nullable=False, index=True)
+    trans_type = Column(String(30), nullable=False, index=True)
+    quantity_change = Column(Integer, nullable=False)
+    reserved_change = Column(Integer, default=0)
+    balance_after = Column(Integer)
+    reserved_after = Column(Integer)
+    source_type = Column(String(30))
+    source_id = Column(Integer)
+    source_code = Column(String(100))
+    operator_id = Column(Integer, ForeignKey("users.id"))
+    operator_name = Column(String(100))
+    remarks = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    stock = relationship("SparePartStock", back_populates="transactions")
 
 
 class ReplenishmentRequest(Base):
@@ -327,6 +349,7 @@ class ReplenishmentRequest(Base):
     request_code = Column(String(50), unique=True, index=True)
     part_stock_id = Column(Integer, ForeignKey("spare_part_stocks.id"), nullable=False)
     requested_quantity = Column(Integer, nullable=False)
+    total_received = Column(Integer, default=0)
     status = Column(Enum(ReplenishmentStatus), default=ReplenishmentStatus.PENDING, index=True)
     reason = Column(Text)
     source = Column(String(20), default="manual")
@@ -336,9 +359,12 @@ class ReplenishmentRequest(Base):
     approved_at = Column(DateTime)
     approval_notes = Column(Text)
     procurement_order = Column(String(100))
+    supplier = Column(String(200))
     estimated_delivery = Column(DateTime)
     actual_delivery = Column(DateTime)
+    batch_deliveries = Column(JSON, default=list)
     locked_for_outbound = Column(Boolean, default=False)
+    delay_notified = Column(Boolean, default=False)
     pushed = Column(Boolean, default=False)
 
     part_stock = relationship("SparePartStock")

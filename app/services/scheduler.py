@@ -90,7 +90,8 @@ def check_stock_levels():
     db: Session = SessionLocal()
     try:
         low_stocks = SparePartService.check_all_stocks(db)
-        logger.info(f"[定时任务] 库存检查完成 - {len(low_stocks)}项库存告警")
+        delayed = SparePartService.check_delayed_deliveries(db)
+        logger.info(f"[定时任务] 库存检查完成 - {len(low_stocks)}项库存告警, {len(delayed)}项采购延期")
     except Exception as e:
         logger.error(f"[定时任务] 库存检查失败: {e}")
     finally:

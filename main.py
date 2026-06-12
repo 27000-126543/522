@@ -24,7 +24,7 @@ def _run_db_migrations():
     from app.database import SessionLocal
     db = SessionLocal()
     try:
-        # 1. 给 replenishment_requests 加 source 列（如果不存在）
+        # 1. replenishment_requests.source
         try:
             db.execute(text("ALTER TABLE replenishment_requests ADD COLUMN source VARCHAR(20) DEFAULT 'manual'"))
             db.commit()
@@ -32,7 +32,7 @@ def _run_db_migrations():
         except Exception:
             db.rollback()
 
-        # 2. 创建 replenishment_logs 表（如果不存在）
+        # 2. replenishment_logs 表
         try:
             db.execute(text("""
                 CREATE TABLE IF NOT EXISTS replenishment_logs (
@@ -55,6 +55,64 @@ def _run_db_migrations():
         try:
             db.execute(text("CREATE INDEX IF NOT EXISTS ix_replenishment_logs_id ON replenishment_logs(id)"))
             db.execute(text("CREATE INDEX IF NOT EXISTS ix_replenishment_logs_request_id ON replenishment_logs(request_id)"))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        # 3. replenishment_requests 新采购协同列
+        def add_col(col_def: str):
+            try:
+                db.execute(text(f"ALTER TABLE replenishment_requests ADD COLUMN {col_def}"))
+                db.commit()
+            except Exception:
+                db.rollback()
+
+        add_col("total_received INTEGER DEFAULT 0")
+        add_col("supplier VARCHAR(200)")
+        add_col("batch_deliveries TEXT DEFAULT '[]'")
+        add_col("delay_notified BOOLEAN DEFAULT 0")
+
+        # 4. stock_transactions 表
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS stock_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stock_id INTEGER NOT NULL,
+                    trans_type VARCHAR(30) NOT NULL,
+                    quantity_change INTEGER NOT NULL DEFAULT 0,
+                    reserved_change INTEGER DEFAULT 0,
+                    balance_after INTEGER,
+                    reserved_after INTEGER,
+                    source_type VARCHAR(30),
+                    source_id INTEGER,
+                    source_code VARCHAR(100),
+                    operator_id INTEGER,
+                    operator_name VARCHAR(100),
+                    remarks TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            db.commit()
+            logging.info("[迁移] stock_transactions 表已确保存在")
+        except Exception as e:
+            db.rollback()
+            logging.warning(f"[迁移] 创建 stock_transactions 异常: {e}")
+
+        try:
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_stock_transactions_id ON stock_transactions(id)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_stock_transactions_stock_id ON stock_transactions(stock_id)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_stock_transactions_trans_type ON stock_transactions(trans_type)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_stock_transactions_created_at ON stock_transactions(created_at)"))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        # 兼容 SQLite Boolean
+        try:
+            db.execute(text("UPDATE replenishment_requests SET total_received = 0 WHERE total_received IS NULL"))
+            db.execute(text("UPDATE replenishment_requests SET delay_notified = 0 WHERE delay_notified IS NULL"))
+            db.execute(text("UPDATE replenishment_requests SET batch_deliveries = '[]' WHERE batch_deliveries IS NULL"))
+            db.execute(text("UPDATE replenishment_requests SET source = 'manual' WHERE source IS NULL"))
             db.commit()
         except Exception:
             db.rollback()

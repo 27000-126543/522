@@ -350,7 +350,11 @@ async def add_processing_record(
 
         if record_data.spare_parts and wind_farm_id:
             result = SparePartService.consume_parts_in_transaction(
-                db, wind_farm_id, record_data.spare_parts
+                db, wind_farm_id, record_data.spare_parts,
+                work_order_id=order.id,
+                work_order_code=order.order_code,
+                operator_id=current_user.id,
+                operator_name=current_user.full_name,
             )
             if not result["success"]:
                 raise ValueError(result.get("error", "备件扣减失败"))

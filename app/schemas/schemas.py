@@ -375,6 +375,39 @@ class SparePartStockResponse(BaseModel):
         from_attributes = True
 
 
+class StockTransactionResponse(BaseModel):
+    id: int
+    stock_id: int
+    trans_type: str
+    quantity_change: int
+    reserved_change: int = 0
+    balance_after: Optional[int] = None
+    reserved_after: Optional[int] = None
+    source_type: Optional[str] = None
+    source_id: Optional[int] = None
+    source_code: Optional[str] = None
+    operator_id: Optional[int] = None
+    operator_name: Optional[str] = None
+    remarks: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SparePartStockDetailResponse(SparePartStockResponse):
+    available_quantity: int = 0
+    pending_quantity: int = 0
+    recent_transactions: Optional[List[StockTransactionResponse]] = None
+
+
+class BatchDeliveryItem(BaseModel):
+    batch_no: Optional[str] = None
+    quantity: int
+    delivery_date: Optional[datetime] = None
+    remarks: Optional[str] = None
+
+
 class ReplenishmentRequestCreate(BaseModel):
     part_stock_id: int
     requested_quantity: int
@@ -388,8 +421,16 @@ class ReplenishmentApproval(BaseModel):
 
 class ReplenishmentUpdate(BaseModel):
     procurement_order: Optional[str] = None
+    supplier: Optional[str] = None
     estimated_delivery: Optional[datetime] = None
     actual_delivery: Optional[datetime] = None
+
+
+class ReplenishmentDeliveryReceive(BaseModel):
+    quantity: int
+    delivery_date: Optional[datetime] = None
+    batch_no: Optional[str] = None
+    remarks: Optional[str] = None
 
 
 class ReplenishmentResponse(BaseModel):
@@ -397,6 +438,8 @@ class ReplenishmentResponse(BaseModel):
     request_code: str
     part_stock_id: int
     requested_quantity: int
+    total_received: int = 0
+    remaining_quantity: int = 0
     status: ReplenishmentStatus
     source: Optional[str] = None
     reason: Optional[str] = None
@@ -406,9 +449,12 @@ class ReplenishmentResponse(BaseModel):
     approved_at: Optional[datetime] = None
     approval_notes: Optional[str] = None
     procurement_order: Optional[str] = None
+    supplier: Optional[str] = None
     estimated_delivery: Optional[datetime] = None
     actual_delivery: Optional[datetime] = None
+    batch_deliveries: Optional[List[Dict[str, Any]]] = None
     locked_for_outbound: bool
+    delay_notified: bool = False
     logs: Optional[List["ReplenishmentLogResponse"]] = None
 
     class Config:

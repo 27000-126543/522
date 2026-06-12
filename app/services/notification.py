@@ -85,7 +85,8 @@ class NotificationService:
             "approved": f"【审批】{part_stock.part.name} 补货申请已批准",
             "rejected": f"【审批】{part_stock.part.name} 补货申请已拒绝",
             "procuring": f"【采购】{part_stock.part.name} 正在采购中",
-            "completed": f"【到货】{part_stock.part.name} 补货已完成"
+            "completed": f"【到货】{part_stock.part.name} 补货已完成",
+            "delayed": f"【延期】{part_stock.part.name} 采购延期未到货"
         }
         title = event_titles.get(event_type, f"【补货】{part_stock.part.name} 状态变更")
         content = (
@@ -98,6 +99,9 @@ class NotificationService:
 
         if event_type == "created":
             recipients = NotificationService._get_supervisors_and_dispatchers(db, wind_farm.id)
+        elif event_type == "delayed":
+            recipients = NotificationService._get_supervisors_and_dispatchers(db, wind_farm.id)
+            recipients.extend(NotificationService._get_procurement_users(db))
         elif event_type == "approved" or event_type == "procuring":
             recipients = NotificationService._get_procurement_users(db)
             if request.created_by:

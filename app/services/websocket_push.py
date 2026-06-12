@@ -115,20 +115,34 @@ class PushNotificationService:
             "approved": "补货申请已批准",
             "rejected": "补货申请已拒绝",
             "procuring": "补货采购中",
-            "completed": "补货已到货"
+            "completed": "补货已到货",
+            "delayed": "补货采购延期"
         }
         title = event_titles.get(event_type, "补货状态变更")
         farm_name = wind_farm.name if wind_farm else "未知场站"
         current_qty = stock.quantity if stock else 0
         safety_stock = stock.safety_stock if stock else 0
 
-        content = (
-            f"场站: {farm_name}\n"
-            f"备件: {part.name}\n"
-            f"申请数量: {request.requested_quantity}{part.unit or '件'}\n"
-            f"当前库存: {current_qty}, 安全线: {safety_stock}\n"
-            f"状态: {request.status.value}"
-        )
+        if event_type == "delayed" and request.estimated_delivery:
+            from datetime import datetime
+            days_delayed = (datetime.now() - request.estimated_delivery).days
+            remaining = request.requested_quantity - request.total_received
+            content = (
+                f"场站: {farm_name}\n"
+                f"备件: {part.name}\n"
+                f"申请数量: {request.requested_quantity}{part.unit or '件'}\n"
+                f"已到货: {request.total_received}, 还差: {remaining}{part.unit or '件'}\n"
+                f"预计到货: {request.estimated_delivery.strftime('%Y-%m-%d')}, 已延期 {days_delayed} 天\n"
+                f"供应商: {request.supplier or '未设置'}"
+            )
+        else:
+            content = (
+                f"场站: {farm_name}\n"
+                f"备件: {part.name}\n"
+                f"申请数量: {request.requested_quantity}{part.unit or '件'}\n"
+                f"当前库存: {current_qty}, 安全线: {safety_stock}\n"
+                f"状态: {request.status.value}"
+            )
         msg = PushNotificationService._build_message(
             "replenishment",
             f"【{title}】{part.name}",
