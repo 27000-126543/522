@@ -16,7 +16,8 @@ from app.models.models import (
 from app.schemas.schemas import (
     WorkOrderCreate, WorkOrderAssign, WorkOrderUpdateStatus,
     ProcessingRecordCreate, WorkOrderResponse, WorkOrderDetailResponse,
-    ProcessingRecordResponse, FaultHistoryResponse
+    ProcessingRecordResponse, ProcessingRecordWithDetailResponse,
+    FaultHistoryResponse
 )
 
 router = APIRouter(prefix="/api/work-orders", tags=["工单管理"])
@@ -126,6 +127,29 @@ async def get_work_order_detail(
             if turbine and turbine.wind_farm_id != current_user.wind_farm_id:
                 if order.assignee_id != current_user.id:
                     raise HTTPException(status_code=403, detail="无权限访问该工单")
+
+    aggregated = {}
+    for record in order.processing_records:
+        if record.spare_parts and isinstance(record.spare_parts, list):
+            for sp in record.spare_parts:
+                if isinstance(sp, dict):
+                    pid = sp.get("part_id") or sp.get("part_code")
+                    if not pid:
+                        continue
+                    if pid not in aggregated:
+                        aggregated[pid] = {
+                            "part_id": sp.get("part_id"),
+                            "part_code": sp.get("part_code"),
+                            "part_name": sp.get("part_name", str(pid)),
+                            "quantity": 0,
+                            "unit_price": float(sp.get("unit_price", 0)),
+                            "subtotal": 0.0
+                        }
+                    qty = int(sp.get("quantity", 0))
+                    aggregated[pid]["quantity"] += qty
+                    aggregated[pid]["subtotal"] += float(sp.get("subtotal", 0))
+
+    order.spare_parts_detail = list(aggregated.values())
     return order
 
 
@@ -263,7 +287,7 @@ async def update_order_status(
     return order
 
 
-@router.post("/processing-records", response_model=ProcessingRecordResponse)
+@router.post("/processing-records", response_model=ProcessingRecordWithDetailResponse)
 async def add_processing_record(
     record_data: ProcessingRecordCreate,
     db: Session = Depends(get_db),
@@ -285,13 +309,28 @@ async def add_processing_record(
     turbine = db.query(Turbine).filter(Turbine.id == order.turbine_id).first()
     wind_farm_id = turbine.wind_farm_id if turbine and turbine.wind_farm_id else None
 
+    parts_detail = None
+    total_cost = 0.0
+    enriched_spare_parts = record_data.spare_parts
+
     if record_data.spare_parts and wind_farm_id:
         ok, validated, info = SparePartService._validate_parts_availability(
             db, wind_farm_id, record_data.spare_parts
         )
         if not ok:
             detail = "; ".join([f"{f['item']}: {f['reason']}" for f in info["failed"]])
-            raise HTTPException(status_code=400, detail=f"备件库存不足: {detail}")
+            raise HTTPException(status_code=400, detail=f"备件可用库存不足: {detail}")
+
+        enriched_spare_parts = []
+        for v in validated:
+            enriched_spare_parts.append({
+                "part_id": v["part_id"],
+                "part_code": v["part_code"],
+                "part_name": v["part_name"],
+                "quantity": v["quantity"],
+                "unit_price": v["unit_price"],
+                "subtotal": v["subtotal"]
+            })
 
     try:
         record = ProcessingRecord(
@@ -301,7 +340,7 @@ async def add_processing_record(
             description=record_data.description,
             diagnosis=record_data.diagnosis,
             solution=record_data.solution,
-            spare_parts=record_data.spare_parts,
+            spare_parts=enriched_spare_parts,
             photos=record_data.photos,
             before_status=record_data.before_status,
             after_status=record_data.after_status
@@ -316,6 +355,8 @@ async def add_processing_record(
             if not result["success"]:
                 raise ValueError(result.get("error", "备件扣减失败"))
             order.total_cost += result["total_cost"]
+            parts_detail = result["success_items"]
+            total_cost = result["total_cost"]
 
         if record_data.action == "完成":
             order.completed_at = datetime.now()
@@ -335,8 +376,27 @@ async def add_processing_record(
 
         db.commit()
         db.refresh(record)
-        return record
 
+        response = ProcessingRecordWithDetailResponse(
+            id=record.id,
+            work_order_id=record.work_order_id,
+            operator_id=record.operator_id,
+            timestamp=record.timestamp,
+            action=record.action,
+            description=record.description,
+            diagnosis=record.diagnosis,
+            solution=record.solution,
+            spare_parts=record.spare_parts,
+            photos=record.photos,
+            before_status=record.before_status,
+            after_status=record.after_status,
+            spare_parts_detail=parts_detail,
+            total_cost=total_cost
+        )
+        return response
+
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"保存处理记录失败: {str(e)}")

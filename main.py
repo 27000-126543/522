@@ -17,6 +17,54 @@ logging.basicConfig(
 
 Base.metadata.create_all(bind=engine)
 
+
+def _run_db_migrations():
+    """安全地执行数据库迁移，不破坏旧数据"""
+    from sqlalchemy import text
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        # 1. 给 replenishment_requests 加 source 列（如果不存在）
+        try:
+            db.execute(text("ALTER TABLE replenishment_requests ADD COLUMN source VARCHAR(20) DEFAULT 'manual'"))
+            db.commit()
+            logging.info("[迁移] replenishment_requests.source 列已添加")
+        except Exception:
+            db.rollback()
+
+        # 2. 创建 replenishment_logs 表（如果不存在）
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS replenishment_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id INTEGER NOT NULL,
+                    action VARCHAR(50) NOT NULL,
+                    operator_id INTEGER,
+                    operator_name VARCHAR(100),
+                    notes TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (request_id) REFERENCES replenishment_requests(id)
+                )
+            """))
+            db.commit()
+            logging.info("[迁移] replenishment_logs 表已确保存在")
+        except Exception as e:
+            db.rollback()
+            logging.warning(f"[迁移] 创建 replenishment_logs 异常: {e}")
+
+        try:
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_replenishment_logs_id ON replenishment_logs(id)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_replenishment_logs_request_id ON replenishment_logs(request_id)"))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    finally:
+        db.close()
+
+
+_run_db_migrations()
+
 app = FastAPI(
     title=settings.APP_NAME,
     description="""

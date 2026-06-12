@@ -2,8 +2,8 @@ from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.models.models import (
-    SparePart, SparePartStock, ReplenishmentRequest,
-    StockStatus, ReplenishmentStatus, WindFarm, UserRole
+    SparePart, SparePartStock, ReplenishmentRequest, ReplenishmentLog,
+    StockStatus, ReplenishmentStatus, WindFarm, UserRole, User
 )
 from app.services.notification import NotificationService
 from app.services.websocket_push import PushNotificationService, ws_manager
@@ -24,6 +24,10 @@ class SparePartService:
         return StockStatus.NORMAL
 
     @staticmethod
+    def _get_available_quantity(stock: SparePartStock) -> int:
+        return max(0, stock.quantity - stock.reserved_quantity)
+
+    @staticmethod
     def generate_request_code(db: Session) -> str:
         prefix = "RP" + datetime.now().strftime("%Y%m%d")
         last = db.query(ReplenishmentRequest).filter(
@@ -37,6 +41,26 @@ class SparePartService:
         else:
             seq = 1
         return f"{prefix}{seq:03d}"
+
+    @staticmethod
+    def _add_replenishment_log(
+        db: Session,
+        request_id: int,
+        action: str,
+        operator_id: Optional[int] = None,
+        operator_name: Optional[str] = None,
+        notes: Optional[str] = None
+    ) -> ReplenishmentLog:
+        log = ReplenishmentLog(
+            request_id=request_id,
+            action=action,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            notes=notes
+        )
+        db.add(log)
+        db.flush()
+        return log
 
     @staticmethod
     def create_stock(
@@ -72,15 +96,7 @@ class SparePartService:
             return None
 
         if respect_lock and change < 0:
-            locked_qty = db.query(
-                db.query(ReplenishmentRequest)
-                .filter(
-                    ReplenishmentRequest.part_stock_id == stock_id,
-                    ReplenishmentRequest.status == ReplenishmentStatus.APPROVED,
-                    ReplenishmentRequest.locked_for_outbound == True
-                ).count().scalar_subquery()
-            ).scalar() or 0
-            available = stock.quantity - locked_qty
+            available = SparePartService._get_available_quantity(stock)
             if available + change < 0:
                 raise ValueError(f"可用库存不足，可用: {available}")
 
@@ -150,22 +166,26 @@ class SparePartService:
                 failed.append({"item": str(part_code), "reason": "库存记录不存在"})
                 continue
 
-            if stock.quantity < quantity:
+            available = SparePartService._get_available_quantity(stock)
+            if available < quantity:
                 failed.append({
                     "item": str(part_code),
-                    "reason": f"库存不足 (现有: {stock.quantity}, 需要: {quantity})"
+                    "reason": f"可用库存不足 (可用: {available}, 总库存: {stock.quantity}, 已锁定: {stock.reserved_quantity}, 需要: {quantity})"
                 })
                 continue
 
+            unit_price = stock.part.price if stock.part else 0
+            subtotal = unit_price * quantity
             validated.append({
                 "stock_id": stock.id,
                 "part_id": stock.part_id,
                 "part_name": stock.part.name if stock.part else str(part_code),
                 "part_code": stock.part.part_code if stock.part else str(part_code),
                 "quantity": quantity,
-                "unit_price": stock.part.price if stock.part else 0
+                "unit_price": unit_price,
+                "subtotal": subtotal
             })
-            total_cost += (stock.part.price if stock.part else 0) * quantity
+            total_cost += subtotal
 
         return len(failed) == 0, validated, {"failed": failed, "total_cost": total_cost}
 
@@ -181,7 +201,7 @@ class SparePartService:
         if not ok:
             return {
                 "success": False,
-                "error": "备件库存不足，未进行任何扣减",
+                "error": "备件可用库存不足，未进行任何扣减",
                 "details": info["failed"]
             }
 
@@ -202,9 +222,10 @@ class SparePartService:
                     "part_name": v["part_name"],
                     "part_code": v["part_code"],
                     "quantity": v["quantity"],
-                    "unit_price": v["unit_price"]
+                    "unit_price": v["unit_price"],
+                    "subtotal": v["subtotal"]
                 })
-                total_cost += v["unit_price"] * v["quantity"]
+                total_cost += v["subtotal"]
                 affected_stock_ids.append(v["stock_id"])
 
             db.flush()
@@ -229,17 +250,33 @@ class SparePartService:
         created_by: Optional[int] = None,
         auto: bool = False
     ) -> ReplenishmentRequest:
+        source = "auto" if auto else "manual"
         request = ReplenishmentRequest(
             request_code=SparePartService.generate_request_code(db),
             part_stock_id=part_stock_id,
             requested_quantity=requested_quantity,
             reason=reason,
+            source=source,
             created_by=created_by,
             status=ReplenishmentStatus.PENDING,
             locked_for_outbound=False
         )
         db.add(request)
         db.flush()
+
+        creator_name = None
+        if created_by:
+            creator = db.query(User).filter(User.id == created_by).first()
+            if creator:
+                creator_name = creator.full_name
+
+        SparePartService._add_replenishment_log(
+            db, request.id,
+            action="created",
+            operator_id=created_by,
+            operator_name=creator_name or ("系统自动" if auto else None),
+            notes=reason
+        )
 
         stock = db.query(SparePartStock).filter(
             SparePartStock.id == part_stock_id
@@ -249,6 +286,26 @@ class SparePartService:
             NotificationService.notify_replenishment(
                 db, request, stock, wind_farm, "created"
             )
+
+            recipients = NotificationService._get_supervisors_and_dispatchers(
+                db, wind_farm.id
+            )
+            procurement_users = NotificationService._get_procurement_users(db)
+            push_recipients = list(set(recipients + procurement_users))
+            await_fn = PushNotificationService.push_replenishment
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        await_fn(push_recipients, request, stock, stock.part, wind_farm, "created")
+                    )
+                else:
+                    loop.run_until_complete(
+                        await_fn(push_recipients, request, stock, stock.part, wind_farm, "created")
+                    )
+            except RuntimeError:
+                pass
 
         return request
 
@@ -267,6 +324,9 @@ class SparePartService:
         if not request:
             return None
 
+        approver = db.query(User).filter(User.id == approved_by).first()
+        approver_name = approver.full_name if approver else None
+
         request.approved_by = approved_by
         request.approved_at = datetime.now()
         request.approval_notes = approval_notes
@@ -282,9 +342,25 @@ class SparePartService:
                 lock_qty = min(request.requested_quantity, stock.quantity)
                 stock.reserved_quantity = stock.reserved_quantity + lock_qty
                 stock.last_updated = datetime.now()
+
+            SparePartService._add_replenishment_log(
+                db, request.id,
+                action="approved",
+                operator_id=approved_by,
+                operator_name=approver_name,
+                notes=approval_notes or "审批通过"
+            )
         else:
             request.status = ReplenishmentStatus.REJECTED
             request.locked_for_outbound = False
+
+            SparePartService._add_replenishment_log(
+                db, request.id,
+                action="rejected",
+                operator_id=approved_by,
+                operator_name=approver_name,
+                notes=approval_notes or "审批拒绝"
+            )
 
         db.flush()
 
@@ -306,7 +382,8 @@ class SparePartService:
         request_id: int,
         procurement_order: Optional[str] = None,
         estimated_delivery: Optional[datetime] = None,
-        actual_delivery: Optional[datetime] = None
+        actual_delivery: Optional[datetime] = None,
+        operator_id: Optional[int] = None
     ) -> Optional[ReplenishmentRequest]:
         request = db.query(ReplenishmentRequest).filter(
             ReplenishmentRequest.id == request_id
@@ -314,10 +391,27 @@ class SparePartService:
         if not request:
             return None
 
+        if request.status == ReplenishmentStatus.REJECTED:
+            return request
+
+        operator_name = None
+        if operator_id:
+            operator = db.query(User).filter(User.id == operator_id).first()
+            if operator:
+                operator_name = operator.full_name
+
         if procurement_order:
             request.procurement_order = procurement_order
             if request.status in [ReplenishmentStatus.APPROVED, ReplenishmentStatus.PENDING]:
                 request.status = ReplenishmentStatus.PROCURING
+
+                SparePartService._add_replenishment_log(
+                    db, request_id,
+                    action="procuring",
+                    operator_id=operator_id,
+                    operator_name=operator_name,
+                    notes=f"采购单号: {procurement_order}"
+                )
 
         if estimated_delivery:
             request.estimated_delivery = estimated_delivery
@@ -339,6 +433,14 @@ class SparePartService:
                 stock.last_updated = datetime.now()
 
             request.locked_for_outbound = False
+
+            SparePartService._add_replenishment_log(
+                db, request_id,
+                action="completed",
+                operator_id=operator_id,
+                operator_name=operator_name,
+                notes=f"到货完成, 数量: {request.requested_quantity}"
+            )
 
         db.flush()
 
@@ -389,23 +491,25 @@ class SparePartService:
                 results["failed"].append({"item": str(part_code), "reason": "库存不存在"})
                 continue
 
-            available = stock.quantity - stock.reserved_quantity
+            available = SparePartService._get_available_quantity(stock)
             if available < quantity:
                 results["failed"].append({
                     "item": str(part_code),
-                    "reason": f"库存不足 (可用: {available}, 需要: {quantity})"
+                    "reason": f"可用库存不足 (可用: {available}, 需要: {quantity})"
                 })
                 continue
 
             try:
                 SparePartService.update_stock_quantity(db, stock.id, -quantity, check_safety=True)
+                unit_price = stock.part.price if stock.part else 0
                 results["success"].append({
                     "part_id": stock.part_id,
                     "part_name": stock.part.name if stock.part else str(part_code),
                     "quantity": quantity,
-                    "unit_price": stock.part.price if stock.part else 0
+                    "unit_price": unit_price,
+                    "subtotal": unit_price * quantity
                 })
-                results["total_cost"] += (stock.part.price if stock.part else 0) * quantity
+                results["total_cost"] += unit_price * quantity
             except ValueError as e:
                 results["failed"].append({"item": str(part_code), "reason": str(e)})
 

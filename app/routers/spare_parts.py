@@ -8,13 +8,14 @@ from app.services.spare_part import SparePartService
 from app.services.notification import NotificationService
 from app.services.websocket_push import PushNotificationService
 from app.models.models import (
-    SparePart, SparePartStock, ReplenishmentRequest,
+    SparePart, SparePartStock, ReplenishmentRequest, ReplenishmentLog,
     User, UserRole, StockStatus, ReplenishmentStatus, WindFarm
 )
 from app.schemas.schemas import (
     SparePartCreate, SparePartUpdate, SparePartResponse,
     SparePartStockResponse, ReplenishmentRequestCreate,
-    ReplenishmentApproval, ReplenishmentUpdate, ReplenishmentResponse
+    ReplenishmentApproval, ReplenishmentUpdate, ReplenishmentResponse,
+    ReplenishmentLogResponse
 )
 
 router = APIRouter(prefix="/api/spare-parts", tags=["备件库存管理"])
@@ -78,6 +79,7 @@ async def list_stocks(
     wind_farm_id: Optional[int] = None,
     status: Optional[StockStatus] = None,
     below_safety_only: bool = False,
+    below_safety_by_available: bool = False,
     skip: int = 0,
     limit: int = 200,
     db: Session = Depends(get_db),
@@ -95,6 +97,16 @@ async def list_stocks(
         query = query.filter(SparePartStock.quantity < SparePartStock.safety_stock)
 
     results = query.offset(skip).limit(limit).all()
+
+    if below_safety_by_available:
+        results = [
+            s for s in results
+            if (s.quantity - s.reserved_quantity) < s.safety_stock
+        ]
+
+    for s in results:
+        s.available_quantity = max(0, s.quantity - s.reserved_quantity)
+
     return results if results is not None else []
 
 
@@ -157,11 +169,14 @@ async def create_replenishment_request(
         reason=req_data.reason, created_by=current_user.id, auto=False
     )
 
+    wind_farm = stock.wind_farm
     recipients = NotificationService._get_supervisors_and_dispatchers(
         db, stock.wind_farm_id
     )
+    procurement_users = NotificationService._get_procurement_users(db)
+    all_recipients = list(set(recipients + procurement_users))
     await PushNotificationService.push_replenishment(
-        recipients, request, stock.part, "created"
+        all_recipients, request, stock, stock.part, wind_farm, "created"
     )
 
     db.commit()
@@ -173,6 +188,9 @@ async def create_replenishment_request(
 async def list_replenishment_requests(
     status: Optional[ReplenishmentStatus] = None,
     wind_farm_id: Optional[int] = None,
+    source: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
     mine_only: bool = False,
     skip: int = 0,
     limit: int = 100,
@@ -184,6 +202,12 @@ async def list_replenishment_requests(
         query = query.filter(ReplenishmentRequest.created_by == current_user.id)
     if status:
         query = query.filter(ReplenishmentRequest.status == status)
+    if source:
+        query = query.filter(ReplenishmentRequest.source == source)
+    if start_time:
+        query = query.filter(ReplenishmentRequest.created_at >= start_time)
+    if end_time:
+        query = query.filter(ReplenishmentRequest.created_at <= end_time)
     if current_user.role in [UserRole.SUPERVISOR, UserRole.OPERATOR]:
         if current_user.wind_farm_id:
             stock_ids = [s.id for s in db.query(SparePartStock.id).filter(
@@ -206,6 +230,20 @@ async def list_replenishment_requests(
     return results if results is not None else []
 
 
+@router.get("/replenishment/{request_id}", response_model=ReplenishmentResponse)
+async def get_replenishment_detail(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    request = db.query(ReplenishmentRequest).filter(
+        ReplenishmentRequest.id == request_id
+    ).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="补货申请不存在")
+    return request
+
+
 @router.post("/replenishment/{request_id}/approve", response_model=ReplenishmentResponse)
 async def approve_replenishment(
     request_id: int,
@@ -226,6 +264,7 @@ async def approve_replenishment(
         SparePartStock.id == request.part_stock_id
     ).first()
     if stock:
+        wind_farm = stock.wind_farm
         event = "approved" if approval_data.approved else "rejected"
         if approval_data.approved:
             procurement_users = NotificationService._get_procurement_users(db)
@@ -233,7 +272,7 @@ async def approve_replenishment(
         else:
             recipients = [request.created_by] if request.created_by else []
         await PushNotificationService.push_replenishment(
-            list(set(recipients)), request, stock.part, event
+            list(set(recipients)), request, stock, stock.part, wind_farm, event
         )
 
     db.commit()
@@ -263,12 +302,15 @@ async def update_procurement_info(
         SparePartStock.id == request.part_stock_id
     ).first()
     if stock and update_data.actual_delivery:
+        wind_farm = stock.wind_farm
         recipients = [request.created_by] if request.created_by else []
         recipients.extend(
             NotificationService._get_supervisors_and_dispatchers(db, stock.wind_farm_id)
         )
+        procurement_users = NotificationService._get_procurement_users(db)
+        all_recipients = list(set(recipients + procurement_users))
         await PushNotificationService.push_replenishment(
-            list(set(recipients)), request, stock.part, "completed"
+            all_recipients, request, stock, stock.part, wind_farm, "completed"
         )
 
     db.commit()

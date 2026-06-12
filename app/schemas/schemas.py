@@ -286,6 +286,7 @@ class WorkOrderResponse(BaseModel):
 
 class WorkOrderDetailResponse(WorkOrderResponse):
     processing_records: List["ProcessingRecordResponse"] = []
+    spare_parts_detail: Optional[List[Dict[str, Any]]] = None
 
 
 class ProcessingRecordResponse(BaseModel):
@@ -304,6 +305,20 @@ class ProcessingRecordResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ProcessingRecordWithDetailResponse(ProcessingRecordResponse):
+    spare_parts_detail: Optional[List[Dict[str, Any]]] = None
+    total_cost: Optional[float] = None
+
+
+class SparePartConsumptionDetail(BaseModel):
+    part_id: int
+    part_name: str
+    part_code: Optional[str] = None
+    quantity: int
+    unit_price: float
+    subtotal: float
 
 
 class SparePartCreate(BaseModel):

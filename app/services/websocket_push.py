@@ -109,7 +109,7 @@ class PushNotificationService:
         await ws_manager.broadcast(user_ids, msg)
 
     @staticmethod
-    async def push_replenishment(user_ids: list, request, part, event_type: str):
+    async def push_replenishment(user_ids: list, request, stock, part, wind_farm, event_type: str):
         event_titles = {
             "created": "补货申请创建",
             "approved": "补货申请已批准",
@@ -118,16 +118,35 @@ class PushNotificationService:
             "completed": "补货已到货"
         }
         title = event_titles.get(event_type, "补货状态变更")
+        farm_name = wind_farm.name if wind_farm else "未知场站"
+        current_qty = stock.quantity if stock else 0
+        safety_stock = stock.safety_stock if stock else 0
+
+        content = (
+            f"场站: {farm_name}\n"
+            f"备件: {part.name}\n"
+            f"申请数量: {request.requested_quantity}{part.unit or '件'}\n"
+            f"当前库存: {current_qty}, 安全线: {safety_stock}\n"
+            f"状态: {request.status.value}"
+        )
         msg = PushNotificationService._build_message(
             "replenishment",
             f"【{title}】{part.name}",
-            f"申请#{request.request_code}: {request.requested_quantity}"
-            f"{part.unit or '件'}, 状态: {request.status.value}",
+            content,
             "replenishment",
             request.id,
-            {"request_code": request.request_code,
-             "part_name": part.name,
-             "event_type": event_type}
+            {
+                "request_code": request.request_code,
+                "part_name": part.name,
+                "part_code": part.part_code,
+                "wind_farm_id": wind_farm.id if wind_farm else None,
+                "wind_farm_name": farm_name,
+                "current_quantity": current_qty,
+                "safety_stock": safety_stock,
+                "requested_quantity": request.requested_quantity,
+                "source": request.source if hasattr(request, 'source') else None,
+                "event_type": event_type
+            }
         )
         await ws_manager.broadcast(user_ids, msg)
 
