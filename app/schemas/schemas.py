@@ -331,6 +331,7 @@ class SparePartCreate(BaseModel):
     supplier: Optional[str] = None
     lead_time_days: int = 7
     suitable_models: Optional[List[str]] = None
+    safety_stock: int = 10
 
 
 class SparePartUpdate(BaseModel):
