@@ -1,5 +1,5 @@
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -282,43 +282,64 @@ async def add_processing_record(
     if not can_add:
         raise HTTPException(status_code=403, detail="无权限添加工单记录")
 
-    record = ProcessingRecord(
-        work_order_id=record_data.work_order_id,
-        operator_id=current_user.id,
-        action=record_data.action,
-        description=record_data.description,
-        diagnosis=record_data.diagnosis,
-        solution=record_data.solution,
-        spare_parts=record_data.spare_parts,
-        photos=record_data.photos,
-        before_status=record_data.before_status,
-        after_status=record_data.after_status
-    )
-    db.add(record)
-    db.flush()
+    turbine = db.query(Turbine).filter(Turbine.id == order.turbine_id).first()
+    wind_farm_id = turbine.wind_farm_id if turbine and turbine.wind_farm_id else None
 
-    if record_data.spare_parts:
-        turbine = db.query(Turbine).filter(Turbine.id == order.turbine_id).first()
-        if turbine and turbine.wind_farm_id:
-            result = SparePartService.consume_parts(
-                db, turbine.wind_farm_id, record_data.spare_parts
+    if record_data.spare_parts and wind_farm_id:
+        ok, validated, info = SparePartService._validate_parts_availability(
+            db, wind_farm_id, record_data.spare_parts
+        )
+        if not ok:
+            detail = "; ".join([f"{f['item']}: {f['reason']}" for f in info["failed"]])
+            raise HTTPException(status_code=400, detail=f"备件库存不足: {detail}")
+
+    try:
+        record = ProcessingRecord(
+            work_order_id=record_data.work_order_id,
+            operator_id=current_user.id,
+            action=record_data.action,
+            description=record_data.description,
+            diagnosis=record_data.diagnosis,
+            solution=record_data.solution,
+            spare_parts=record_data.spare_parts,
+            photos=record_data.photos,
+            before_status=record_data.before_status,
+            after_status=record_data.after_status
+        )
+        db.add(record)
+        db.flush()
+
+        if record_data.spare_parts and wind_farm_id:
+            result = SparePartService.consume_parts_in_transaction(
+                db, wind_farm_id, record_data.spare_parts
             )
+            if not result["success"]:
+                raise ValueError(result.get("error", "备件扣减失败"))
             order.total_cost += result["total_cost"]
 
-    if record_data.action == "完成":
-        order.completed_at = datetime.now()
-        order.status = OrderStatus.COMPLETED
-        turbine = db.query(Turbine).filter(Turbine.id == order.turbine_id).first()
-        if turbine:
-            PersistentFaultService.record_fault_history(
-                db, turbine, order
-            )
-            wind_farm = turbine.wind_farm
-            NotificationService.notify_work_order(db, order, turbine, wind_farm, "completed")
+        if record_data.action == "完成":
+            order.completed_at = datetime.now()
+            order.status = OrderStatus.COMPLETED
+            if turbine:
+                PersistentFaultService.record_fault_history(
+                    db, turbine, order
+                )
+                wind_farm = turbine.wind_farm
+                NotificationService.notify_work_order(db, order, turbine, wind_farm, "completed")
+                recipients = NotificationService._get_recipients_for_work_order(
+                    db, wind_farm.id if wind_farm else 0, order.urgency_level
+                )
+                await PushNotificationService.push_work_order(
+                    recipients, order, turbine, "completed"
+                )
 
-    db.commit()
-    db.refresh(record)
-    return record
+        db.commit()
+        db.refresh(record)
+        return record
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"保存处理记录失败: {str(e)}")
 
 
 @router.get("/{order_id}/records", response_model=List[ProcessingRecordResponse])
@@ -349,7 +370,7 @@ async def get_turbine_fault_history(
         if current_user.wind_farm_id and current_user.wind_farm_id != turbine.wind_farm_id:
             raise HTTPException(status_code=403, detail="无权限访问")
 
-    cutoff = datetime.now() - __import__("datetime").timedelta(days=days)
+    cutoff = datetime.now() - timedelta(days=days)
     return db.query(FaultHistory).filter(
         FaultHistory.turbine_id == turbine_id,
         FaultHistory.occurrence_time >= cutoff

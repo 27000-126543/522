@@ -9,7 +9,7 @@ from app.services.notification import NotificationService
 from app.services.websocket_push import PushNotificationService
 from app.models.models import (
     SparePart, SparePartStock, ReplenishmentRequest,
-    User, UserRole, StockStatus, ReplenishmentStatus
+    User, UserRole, StockStatus, ReplenishmentStatus, WindFarm
 )
 from app.schemas.schemas import (
     SparePartCreate, SparePartUpdate, SparePartResponse,
@@ -35,14 +35,10 @@ async def create_spare_part(
         raise HTTPException(status_code=400, detail="备件编码已存在")
 
     data = part_data.model_dump()
-    if "suitable_models" in data and data["suitable_models"]:
-        pass
-
     part = SparePart(**data)
     db.add(part)
     db.flush()
 
-    from app.models.models import WindFarm
     farms = db.query(WindFarm).all()
     for farm in farms:
         existing_stock = db.query(SparePartStock).filter(
@@ -77,38 +73,6 @@ async def list_spare_parts(
     return query.offset(skip).limit(limit).all()
 
 
-@router.get("/{part_id}", response_model=SparePartResponse)
-async def get_spare_part(
-    part_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    part = db.query(SparePart).filter(SparePart.id == part_id).first()
-    if not part:
-        raise HTTPException(status_code=404, detail="备件不存在")
-    return part
-
-
-@router.put("/{part_id}", response_model=SparePartResponse)
-async def update_spare_part(
-    part_id: int,
-    part_data: SparePartUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_roles(
-        UserRole.ADMIN, UserRole.PROCUREMENT, UserRole.SUPERVISOR
-    ))
-):
-    part = db.query(SparePart).filter(SparePart.id == part_id).first()
-    if not part:
-        raise HTTPException(status_code=404, detail="备件不存在")
-
-    for key, value in part_data.model_dump(exclude_unset=True).items():
-        setattr(part, key, value)
-    db.commit()
-    db.refresh(part)
-    return part
-
-
 @router.get("/stocks/list", response_model=List[SparePartStockResponse])
 async def list_stocks(
     wind_farm_id: Optional[int] = None,
@@ -130,7 +94,8 @@ async def list_stocks(
     if below_safety_only:
         query = query.filter(SparePartStock.quantity < SparePartStock.safety_stock)
 
-    return query.offset(skip).limit(limit).all()
+    results = query.offset(skip).limit(limit).all()
+    return results if results is not None else []
 
 
 @router.post("/stocks/{stock_id}/adjust")
@@ -199,6 +164,8 @@ async def create_replenishment_request(
         recipients, request, stock.part, "created"
     )
 
+    db.commit()
+    db.refresh(request)
     return request
 
 
@@ -219,17 +186,24 @@ async def list_replenishment_requests(
         query = query.filter(ReplenishmentRequest.status == status)
     if current_user.role in [UserRole.SUPERVISOR, UserRole.OPERATOR]:
         if current_user.wind_farm_id:
-            stock_ids = [s.id for s in db.query(SparePartStock).filter(
+            stock_ids = [s.id for s in db.query(SparePartStock.id).filter(
                 SparePartStock.wind_farm_id == current_user.wind_farm_id
             ).all()]
-            query = query.filter(ReplenishmentRequest.part_stock_id.in_(stock_ids))
+            if stock_ids:
+                query = query.filter(ReplenishmentRequest.part_stock_id.in_(stock_ids))
+            else:
+                return []
     if wind_farm_id:
-        stock_ids = [s.id for s in db.query(SparePartStock).filter(
+        stock_ids = [s.id for s in db.query(SparePartStock.id).filter(
             SparePartStock.wind_farm_id == wind_farm_id
         ).all()]
-        query = query.filter(ReplenishmentRequest.part_stock_id.in_(stock_ids))
+        if stock_ids:
+            query = query.filter(ReplenishmentRequest.part_stock_id.in_(stock_ids))
+        else:
+            return []
 
-    return query.order_by(ReplenishmentRequest.created_at.desc()).offset(skip).limit(limit).all()
+    results = query.order_by(ReplenishmentRequest.created_at.desc()).offset(skip).limit(limit).all()
+    return results if results is not None else []
 
 
 @router.post("/replenishment/{request_id}/approve", response_model=ReplenishmentResponse)
@@ -253,12 +227,17 @@ async def approve_replenishment(
     ).first()
     if stock:
         event = "approved" if approval_data.approved else "rejected"
-        procurement_users = NotificationService._get_procurement_users(db)
-        recipients = list(set(procurement_users + ([request.created_by] if request.created_by else [])))
+        if approval_data.approved:
+            procurement_users = NotificationService._get_procurement_users(db)
+            recipients = list(set(procurement_users + ([request.created_by] if request.created_by else [])))
+        else:
+            recipients = [request.created_by] if request.created_by else []
         await PushNotificationService.push_replenishment(
-            recipients, request, stock.part, event
+            list(set(recipients)), request, stock.part, event
         )
 
+    db.commit()
+    db.refresh(request)
     return request
 
 
@@ -292,6 +271,8 @@ async def update_procurement_info(
             list(set(recipients)), request, stock.part, "completed"
         )
 
+    db.commit()
+    db.refresh(request)
     return request
 
 
@@ -300,6 +281,7 @@ async def init_demo_parts(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.ADMIN))
 ):
+    import random
     demo_parts = [
         {"part_code": "SP-GB-OIL-001", "name": "齿轮箱润滑油", "category": "油品", "specification": "320#合成齿轮油",
          "unit": "桶", "price": 2800.0, "supplier": "壳牌", "lead_time_days": 3,
@@ -322,7 +304,6 @@ async def init_demo_parts(
     ]
 
     created_parts = []
-    from app.models.models import WindFarm
     farms = db.query(WindFarm).all()
 
     for dp in demo_parts:
@@ -337,7 +318,6 @@ async def init_demo_parts(
                     SparePartStock.wind_farm_id == farm.id
                 ).first()
                 if not es:
-                    import random
                     qty = random.randint(0, 25)
                     safety = random.randint(5, 15)
                     SparePartService.create_stock(db, part.id, farm.id, qty, safety)
@@ -345,3 +325,35 @@ async def init_demo_parts(
 
     db.commit()
     return {"message": "演示备件初始化完成", "created": created_parts}
+
+
+@router.get("/{part_id}", response_model=SparePartResponse)
+async def get_spare_part(
+    part_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    part = db.query(SparePart).filter(SparePart.id == part_id).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="备件不存在")
+    return part
+
+
+@router.put("/{part_id}", response_model=SparePartResponse)
+async def update_spare_part(
+    part_id: int,
+    part_data: SparePartUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(
+        UserRole.ADMIN, UserRole.PROCUREMENT, UserRole.SUPERVISOR
+    ))
+):
+    part = db.query(SparePart).filter(SparePart.id == part_id).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="备件不存在")
+
+    for key, value in part_data.model_dump(exclude_unset=True).items():
+        setattr(part, key, value)
+    db.commit()
+    db.refresh(part)
+    return part

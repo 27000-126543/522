@@ -48,11 +48,17 @@ def check_order_timeouts():
                     )
 
         assigned_orders = db.query(WorkOrder).filter(
-            WorkOrder.status.in_([OrderStatus.ASSIGNED, OrderStatus.ACCEPTED]),
+            WorkOrder.status.in_([OrderStatus.ASSIGNED, OrderStatus.ACCEPTED, OrderStatus.IN_PROGRESS]),
         ).all()
 
         for order in assigned_orders:
-            ref_time = order.assigned_at or order.created_at
+            if order.status == OrderStatus.ASSIGNED:
+                ref_time = order.assigned_at or order.created_at
+                timeout_type = "未接单超时"
+            else:
+                ref_time = order.started_at or order.accepted_at or order.assigned_at or order.created_at
+                timeout_type = "处理中超时"
+
             if ref_time and (now - ref_time) >= timedelta(
                 minutes=settings.ORDER_ESCALATE_TIMEOUT_MINUTES
             ):
@@ -62,8 +68,7 @@ def check_order_timeouts():
                     order.status = OrderStatus.ESCALATED
                     order.escalated_at = now
                     order.escalation_reason = (
-                        f"处理超时（当前等级{current_level + 1}）"
-                        f" - {'接单' if order.status == OrderStatus.ASSIGNED else '处理'}超时"
+                        f"{timeout_type}（升级等级{current_level + 1}）"
                     )
 
                     turbine = order.turbine
@@ -71,11 +76,6 @@ def check_order_timeouts():
                         NotificationService.notify_work_order(
                             db, order, turbine, turbine.wind_farm, "escalated"
                         )
-
-                    if order.status == OrderStatus.ASSIGNED:
-                        order.status = OrderStatus.ESCALATED
-                    else:
-                        order.status = OrderStatus.IN_PROGRESS
 
         db.commit()
         logger.info(f"[定时任务] 工单超时检查完成 - 自动分配{len(pending_orders)}单, 升级处理")

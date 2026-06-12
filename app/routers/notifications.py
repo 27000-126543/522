@@ -102,7 +102,7 @@ async def websocket_endpoint(
     token: Optional[str] = Query(None)
 ):
     from app.database import SessionLocal
-    from app.services.auth import SECRET_KEY, ALGORITHM, oauth2_scheme
+    from app.config import settings
     from jose import JWTError, jwt
 
     if not token:
@@ -111,7 +111,7 @@ async def websocket_endpoint(
 
     db = SessionLocal()
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         username: str = payload.get("sub")
         if not username:
             await websocket.close(code=1008, reason="无效token")

@@ -297,7 +297,7 @@ class ProcessingRecordResponse(BaseModel):
     description: Optional[str] = None
     diagnosis: Optional[str] = None
     solution: Optional[str] = None
-    spare_parts: Optional[Dict[str, Any]] = None
+    spare_parts: Optional[List[Dict[str, Any]]] = None
     photos: Optional[List[str]] = None
     before_status: Optional[str] = None
     after_status: Optional[str] = None
